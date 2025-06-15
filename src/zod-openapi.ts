@@ -87,7 +87,7 @@ function parseTypeof(
     | 'object'
     | 'function'
     | 'null'
-    | string,
+    | (string & {}),
 ): SchemaObject {
   return parseTypeofObject[type] ?? {};
 }
