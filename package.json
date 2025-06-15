@@ -1,6 +1,6 @@
 {
   "name": "@st-api/zod-openapi",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "",
   "homepage": "https://github.com/stLmpp/st-api-zod-openapi#readme",
   "bugs": {

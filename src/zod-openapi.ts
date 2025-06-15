@@ -1,5 +1,5 @@
 import { mergeAndConcat } from 'merge-anything';
-import type { SchemaObject } from 'openapi3-ts/oas30';
+import type { SchemaObject, SchemaObjectType } from 'openapi3-ts/oas30';
 import {
   AnyZodObject,
   ZodAny,
@@ -26,7 +26,6 @@ import {
   ZodPipeline,
   ZodReadonly,
   ZodRecord,
-  ZodSchema,
   ZodString,
   ZodTransformer,
   ZodTypeAny,
@@ -34,7 +33,7 @@ import {
   ZodUnknown,
 } from 'zod';
 
-type CustomSchemaObject = SchemaObject & { hideDefinitions?: string[] };
+export type CustomSchemaObject = SchemaObject & { hideDefinitions?: string[] };
 
 export interface OpenApiZodAny extends ZodTypeAny {
   metaOpenApi?: CustomSchemaObject | CustomSchemaObject[];
@@ -49,47 +48,6 @@ interface ParsingArgs<T> {
   schemas: CustomSchemaObject[];
   useOutput?: boolean;
   hideDefinitions?: string[];
-}
-
-const parseTypeofObject: Record<string, SchemaObject> = {
-  string: {
-    type: 'string',
-  },
-  number: {
-    type: 'number',
-  },
-  symbol: {
-    type: 'string',
-  },
-  bigint: {
-    type: 'integer',
-    format: 'int64',
-  },
-  boolean: {
-    type: 'boolean',
-  },
-  undefined: {},
-  object: {},
-  function: {},
-  null: {
-    nullable: true,
-  },
-};
-
-function parseTypeof(
-  type:
-    | 'string'
-    | 'number'
-    | 'symbol'
-    | 'bigint'
-    | 'boolean'
-    | 'undefined'
-    | 'object'
-    | 'function'
-    | 'null'
-    | (string & {}),
-): SchemaObject {
-  return parseTypeofObject[type] ?? {};
 }
 
 export function extendApi<T extends OpenApiZodAny>(
@@ -135,34 +93,37 @@ function parseTransformation({
       zodRef._def.effect.type === 'transform' ? zodRef._def.effect : null;
     if (effect && 'transform' in effect) {
       try {
+        const type = Array.isArray(input.type) ? input.type[0] : input.type;
         output = typeof effect.transform(
-          ['integer', 'number'].includes(`${input.type}`)
+          ['integer', 'number'].includes(`${type}`)
             ? 0
-            : 'string' === input.type
+            : 'string' === type
               ? ''
-              : 'boolean' === input.type
+              : 'boolean' === type
                 ? false
-                : 'object' === input.type
+                : 'object' === type
                   ? {}
-                  : 'null' === input.type
+                  : 'null' === type
                     ? null
-                    : 'array' === input.type
+                    : 'array' === type
                       ? []
                       : undefined,
-          { addIssue: () => {}, path: [] },
+          { addIssue: () => undefined, path: [] }, // TODO: Discover if context is necessary here
         );
-      } catch {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      } catch (e) {
         /**/
       }
     }
   }
+  const outputType = output as 'number' | 'string' | 'boolean' | 'null';
   return mergeWithDescription(
     zodRef,
     {
       ...(zodRef.description ? { description: zodRef.description } : {}),
       ...input,
       ...(['number', 'string', 'boolean', 'null'].includes(output)
-        ? parseTypeof(output)
+        ? { type: outputType }
         : {}),
     },
     ...schemas,
@@ -232,14 +193,18 @@ function parseNumber({
   for (const item of checks) {
     switch (item.kind) {
       case 'max': {
-        baseSchema.maximum = item.value;
+        if (item.inclusive) {
+          baseSchema.maximum = item.value;
+        }
         if (!item.inclusive) {
           baseSchema.exclusiveMaximum = true;
         }
         break;
       }
       case 'min': {
-        baseSchema.minimum = item.value;
+        if (item.inclusive) {
+          baseSchema.minimum = item.value;
+        }
         if (!item.inclusive) {
           baseSchema.exclusiveMinimum = true;
         }
@@ -251,6 +216,7 @@ function parseNumber({
       }
       case 'multipleOf': {
         baseSchema.multipleOf = item.value;
+        break;
       }
     }
   }
@@ -290,11 +256,13 @@ function parseObject({
     additionalProperties = generateSchema(zodRef._def.catchall, useOutput);
   } else if (zodRef._def.unknownKeys === 'passthrough') {
     additionalProperties = true;
-  } else if (zodRef._def.unknownKeys === 'strict') additionalProperties = false;
+  } else if (zodRef._def.unknownKeys === 'strict') {
+    additionalProperties = false;
+  }
 
   // So that `undefined` values don't end up in the schema and be weird
   additionalProperties =
-    additionalProperties == null ? {} : { additionalProperties };
+    additionalProperties != null ? { additionalProperties } : {};
 
   const requiredProperties = Object.keys(zodRef.shape).filter((key) => {
     const item = (zodRef as AnyZodObject).shape[key];
@@ -455,12 +423,10 @@ function parseLiteral({
   schemas,
   zodRef,
 }: ParsingArgs<ZodLiteral<OpenApiZodAny>>): SchemaObject {
+  const type = typeof zodRef._def.value as 'string' | 'number' | 'boolean';
   return mergeWithDescription(
     zodRef,
-    {
-      ...parseTypeof(typeof zodRef._def.value),
-      enum: [zodRef._def.value],
-    },
+    { type, enum: [zodRef._def.value] },
     ...schemas,
   );
 }
@@ -469,12 +435,12 @@ function parseEnum({
   schemas,
   zodRef,
 }: ParsingArgs<ZodEnum<never> | ZodNativeEnum<never>>): SchemaObject {
+  const type = typeof Object.values(zodRef._def.values)[0] as
+    | 'string'
+    | 'number';
   return mergeWithDescription(
     zodRef,
-    {
-      ...parseTypeof(typeof Object.values(zodRef._def.values)[0]),
-      enum: Object.values(zodRef._def.values),
-    },
+    { type, enum: Object.values(zodRef._def.values) },
     ...schemas,
   );
 }
@@ -509,7 +475,7 @@ function parseUnion({
     )
   ) {
     // special case to transform unions of literals into enums
-    const literals = contents;
+    const literals = contents as unknown as ZodLiteral<OpenApiZodAny>[];
     const type = literals.reduce(
       (prev, content) =>
         !prev || prev === typeof content._def.value
@@ -522,7 +488,7 @@ function parseUnion({
       return mergeWithDescription(
         zodRef,
         {
-          ...parseTypeof(type),
+          type: type as SchemaObjectType,
           enum: literals.map((literal) => literal._def.value),
         },
         ...schemas,
@@ -530,11 +496,17 @@ function parseUnion({
     }
   }
 
+  const oneOfContents = contents.filter(
+    (content) => content._def.typeName !== 'ZodNull',
+  );
+  const contentsHasNull = contents.length !== oneOfContents.length;
+
   return mergeWithDescription(
     zodRef,
     {
-      oneOf: contents.map((schema) => generateSchema(schema, useOutput)),
+      oneOf: oneOfContents.map((schema) => generateSchema(schema, useOutput)),
     },
+    contentsHasNull ? { nullable: true } : {},
     ...schemas,
   );
 }
@@ -552,7 +524,7 @@ function parseDiscriminatedUnion({
       discriminator: {
         propertyName: zodRef._def.discriminator,
       },
-      oneOf: [...zodRef._def.options.values()].map((schema) =>
+      oneOf: Array.from(zodRef._def.options.values()).map((schema) =>
         generateSchema(schema, useOutput),
       ),
     },
@@ -567,10 +539,11 @@ function parseNever({ zodRef, schemas }: ParsingArgs<ZodNever>): SchemaObject {
 function parseBranded({
   schemas,
   zodRef,
+  useOutput,
 }: ParsingArgs<ZodBranded<ZodAny, string>>): SchemaObject {
   return mergeWithDescription(
     zodRef,
-    generateSchema(zodRef._def.type),
+    generateSchema(zodRef._def.type, useOutput),
     ...schemas,
   );
 }
@@ -583,20 +556,13 @@ function catchAllParser({
 }
 
 function parsePipeline({
+  schemas,
   zodRef,
   useOutput,
-  schemas,
 }: ParsingArgs<ZodPipeline<never, never>>): SchemaObject {
-  if (useOutput) {
-    return mergeWithDescription(
-      zodRef,
-      generateSchema(zodRef._def.out, useOutput),
-      ...schemas,
-    );
-  }
   return mergeWithDescription(
     zodRef,
-    generateSchema(zodRef._def.in, useOutput),
+    generateSchema(useOutput ? zodRef._def.out : zodRef._def.in, useOutput),
     ...schemas,
   );
 }
@@ -626,7 +592,7 @@ function parseCatch({
 }
 
 function mergeWithDescription(
-  zodRef: ZodSchema,
+  zodRef: OpenApiZodAny,
   ...schemas: SchemaObject[]
 ): SchemaObject {
   let [first, ...rest] = schemas;
@@ -676,7 +642,7 @@ const workerMap: Record<string, (options: ParsingArgs<any>) => SchemaObject> = {
 
 export function generateSchema(
   zodRef: OpenApiZodAny,
-  useOutput?: boolean,
+  useOutput = false,
 ): SchemaObject {
   const { metaOpenApi = {} } = zodRef;
   const schemas: CustomSchemaObject[] = [
